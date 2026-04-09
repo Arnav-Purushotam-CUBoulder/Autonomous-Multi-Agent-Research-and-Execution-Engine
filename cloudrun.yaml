@@ -1,0 +1,16 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: atlas-agent
+spec:
+  template:
+    spec:
+      containers:
+        - image: us-docker.pkg.dev/PROJECT_ID/atlas/atlas-agent:latest
+          env:
+            - name: PORT
+              value: "8080"
+            - name: GCP_GCS_BUCKET
+              value: "atlas-agent-artifacts"
+            - name: GCP_GCS_PREFIX
+              value: "atlas-runs"
