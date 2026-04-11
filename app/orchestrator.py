@@ -23,6 +23,7 @@ from .agents import (
     planner_agent,
     researcher_agent,
 )
+from .messaging import RunEventPublisher
 from .tools import (
     raw_list_workspace_files,
     raw_save_artifact,
@@ -34,8 +35,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 class RunOrchestrator:
-    def __init__(self) -> None:
+    def __init__(self, publisher: RunEventPublisher | None = None) -> None:
         self._locks: dict[str, asyncio.Lock] = {}
+        self._publisher = publisher or RunEventPublisher()
 
     def _get_lock(self, run_id: str) -> asyncio.Lock:
         return self._locks.setdefault(run_id, asyncio.Lock())
@@ -49,6 +51,12 @@ class RunOrchestrator:
 
             revision = run.current_revision
             db.update_run(run_id, status="running", error_message="")
+            self._publish_event(
+                "run.started",
+                run_id,
+                current_revision=revision,
+                workspace_path=run.workspace_path,
+            )
 
             try:
                 plan_json = await self._run_planning_stage(run_id)
@@ -75,8 +83,20 @@ class RunOrchestrator:
                     error_message="",
                     current_revision=revision,
                 )
+                self._publish_event(
+                    "run.completed",
+                    run_id,
+                    current_revision=revision,
+                    final_report_length=len(final_report),
+                )
             except Exception as exc:
                 db.update_run(run_id, status="failed", error_message=str(exc), current_revision=revision)
+                self._publish_event(
+                    "run.failed",
+                    run_id,
+                    current_revision=revision,
+                    error_message=str(exc),
+                )
                 raise
 
     async def _run_planning_stage(self, run_id: str) -> str:
@@ -154,6 +174,13 @@ class RunOrchestrator:
             input_text=input_text,
             metadata={"agent": agent_name},
         )
+        self._publish_event(
+            "stage.started",
+            run_id,
+            stage_name=stage_name,
+            agent_name=agent_name,
+            step_id=step_id,
+        )
         try:
             result = await run_callable()
             output_text = self._stringify_output(result)
@@ -168,6 +195,13 @@ class RunOrchestrator:
                 metadata=metadata,
                 mark_finished=True,
             )
+            self._publish_event(
+                "stage.completed",
+                run_id,
+                stage_name=stage_name,
+                agent_name=agent_name,
+                step_id=step_id,
+            )
             return output_text
         except Exception as exc:
             db.update_step(
@@ -176,6 +210,14 @@ class RunOrchestrator:
                 output_text=str(exc),
                 metadata={"error": str(exc)},
                 mark_finished=True,
+            )
+            self._publish_event(
+                "stage.failed",
+                run_id,
+                stage_name=stage_name,
+                agent_name=agent_name,
+                step_id=step_id,
+                error_message=str(exc),
             )
             raise
 
@@ -440,3 +482,9 @@ class RunOrchestrator:
         if run is None:
             raise ValueError(f"Run not found: {run_id}")
         return run
+
+    def _publish_event(self, event_type: str, run_id: str, **payload: Any) -> None:
+        try:
+            self._publisher.publish(event_type, {"run_id": run_id, **payload})
+        except Exception:
+            return
